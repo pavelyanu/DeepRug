@@ -1,1 +1,3 @@
 # DeepRug
+
+We are actually doing this aren't we...
