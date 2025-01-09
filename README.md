@@ -1,3 +1,6 @@
 # DeepRug
 
-We are actually doing this aren't we...
+To initialize vqvae submodule run:
+```
+git submodule update --init --recursive
+```
