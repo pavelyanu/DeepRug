@@ -18,11 +18,14 @@ def load_image_tensor(path: str) -> torch.Tensor:
     return image_to_tensor(load_image(path))
 
 def main():
-    model_path = "/home/pavel/dev/university/masters/1-winter/seminar_applications/DeepRug/results/vqvae_20250109_180050_4900.pth"
-    negative_example = "/home/pavel/dev/university/masters/1-winter/seminar_applications/DeepRug/not_carpet.png"
-    maybe_example = "/home/pavel/dev/university/masters/1-winter/seminar_applications/DeepRug/carpet_maybe.png"
-    positive_example = "/home/pavel/dev/university/masters/1-winter/seminar_applications/DeepRug/carpet.png"
-    gae_carpet_example = "/home/pavel/dev/university/masters/1-winter/seminar_applications/DeepRug/gae_carpet.png"
+    model_path = "results/vqvae_20250109_180050_4900.pth"
+
+    examples_root = "vae_metric/examples/"
+
+    negative_example = examples_root + "not_carpet.png"
+    maybe_example = examples_root + "carpet_maybe.png"
+    positive_example = examples_root + "carpet.png"
+    gae_carpet_example = examples_root + "gae_carpet.png"
 
     negative_example = load_image_tensor(negative_example)
     maybe_example = load_image_tensor(maybe_example)
