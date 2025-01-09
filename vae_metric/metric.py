@@ -1,4 +1,4 @@
-from vqvae.models.vqvae import VQVAE
+from models.vqvae import VQVAE
 import torch.nn.functional as F
 import torch
 
@@ -32,4 +32,4 @@ class Metric:
     
     def rl_reward(self, image):
         loss = self.reconstruction_loss(image)
-        return 1.0 / 1.0 + loss
+        return 1.0 / (1.0 + loss)
