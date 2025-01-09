@@ -1,0 +1,3 @@
+[submodule "vqvae"]
+	path = vqvae
+	url = https://github.com/wiseodd/generative-models.git
