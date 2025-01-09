@@ -17,7 +17,7 @@ class CarpetEnv(gym.Env):
         self.observation_space = spaces.Box(                  
             low=0,
             high=self.num_colors-1,
-            shape=(self.size, self.size),
+            shape=(self.size, self.size, 3),
             dtype=np.int32
         )
         self.current_step = 0
@@ -41,7 +41,7 @@ class CarpetEnv(gym.Env):
 
     def _reset_internal_state(self):
         self.current_step = 0
-        self.grid = np.zeros((self.size, self.size), dtype=np.int32)
+        self.grid = np.full((self.size, self.size, 3), 255, dtype=np.int32)
 
     def step(self, action:int):
         """
@@ -51,7 +51,7 @@ class CarpetEnv(gym.Env):
         row = self.current_step // self.size
         col = self.current_step % self.size
 
-        self.grid[row, col] = action
+        self.grid[row, col] = self.color_map[action]
 
         reward = self._calculate_reward()
         self.current_step += 1
@@ -83,11 +83,11 @@ class CarpetEnv(gym.Env):
 
         for row in range(self.size):
             for col in range(self.size):
-                color_label = self.grid[row, col]
-                cell_color = self.color_map[color_label]
+                cell_color = self.grid[row, col]
 
                 x_pos = col * self.px_square_size
                 y_pos = row * self.px_square_size
+
                 rect = pygame.Rect(x_pos, y_pos, self.px_square_size, self.px_square_size)
                 pygame.draw.rect(self.window, cell_color, rect)
 
