@@ -1,0 +1,17 @@
+name: deeprug
+channels:
+  - defaults
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.12
+  - pygame
+  - pytorch-cuda=12.4
+  - torchvision
+  - torchaudio
+  - numpy
+  - pip
+  - pip:
+      - sample-factory
+      - matplotlib
+      - tqdm

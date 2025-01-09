@@ -8,12 +8,12 @@ class Metric:
         
         checkpoint = torch.load(model_path, map_location=self.device)
         self.vqvae = VQVAE(
-            h_dim=checkpoint["h_dim"],
-            res_h_dim=["res_h_dim"],
-            n_res_layers=["n_res_layers"],
-            n_embeddings=["n_embeddings"],
-            embedding_dim=["embedding_dim"],
-            beta=checkpoint["beta"],
+            h_dim=checkpoint['hyperparameters']["n_hiddens"],
+            res_h_dim=checkpoint['hyperparameters']["n_residual_hiddens"],
+            n_res_layers=checkpoint['hyperparameters']["n_residual_layers"],
+            n_embeddings=checkpoint['hyperparameters']["n_embeddings"],
+            embedding_dim=checkpoint['hyperparameters']["embedding_dim"],
+            beta=checkpoint['hyperparameters']["beta"],
         ).to(self.device)
 
         self.vqvae.load_state_dict(checkpoint['model_state_dict'])
