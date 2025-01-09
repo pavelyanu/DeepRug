@@ -2,19 +2,13 @@ import requests
 from bs4 import BeautifulSoup
 import csv
 import os
-import re
-import math
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_URL = "https://www.ecarpetgallery.com/eu_en"
 CATEGORY_URL = BASE_URL + "/shop-all-rugs/?p={}"
 
 OUTPUT_CSV = "carpets.csv"
-IMAGES_FOLDER = "carpet_images"
-MAX_PAGES = 978
-
-# NOTE: Unfortunately more than 1 thread was blocking the access, but i was too lazy to change the code
-MAX_WORKERS = 1  # number of threads for parallel downloads 
+IMAGES_FOLDER = os.path.join("..", "datasets", "carpets")
+MAX_PAGES = 977
 
 
 # NOTE: Do not remove, otherwise the website blocks any access, this way we are giving cookies
@@ -38,15 +32,6 @@ except Exception as e:
 if not os.path.exists(IMAGES_FOLDER):
     os.makedirs(IMAGES_FOLDER)
 
-
-# NOTE: some images are saved in a cache-like system that has bunch of illegal symbols
-#       so basically this cleans the naming system for the file 
-def sanitize_filename(text):
-    """
-    Removes or replaces characters that are invalid in filenames.
-    """
-    return re.sub(r'[\\/*?:"<>|]', '_', text)
-
 def download_image(image_url, filename):
     """
     Downloads an image from 'image_url' and saves it as 'filename'.
@@ -60,7 +45,8 @@ def download_image(image_url, filename):
     except Exception as e:
         print(f"Failed to download {image_url}: {e}")
 
-def scrape_one_page(page_number):
+
+def scrape_one_page(page_number, debug=False):
     """
     Scrapes the given page number and returns a list of dictionaries:
       [
@@ -99,41 +85,54 @@ def scrape_one_page(page_number):
                     "h5.product.product-item-collection.product-item-name a.product-item-link"
                 )
                 carpet_name = name_tag.get_text(strip=True) if name_tag else None
-
+                if debug:
+                    print(f"    carpet_name = {carpet_name}")
                 # 2) Carpet material
                 material_tag = info.select_one(
                     "h5.product.product-item-origin-material.product-item-name a.product-item-link"
                 )
                 carpet_material = material_tag.get_text(strip=True) if material_tag else None
-
+                if debug:
+                    print(f"    material = {carpet_material}")
                 # 3) Carpet weavery
                 weave_tag = info.select_one(
                     "h5.product.product-item-weave.product-item-name a.product-item-link"
                 )
                 carpet_weave = weave_tag.get_text(strip=True) if weave_tag else None
-
+                if debug:
+                    print(f"    weave = {carpet_weave}")
+                # 4) Size
+                size_tag = info.select_one(
+                    "h5.product.product-item-size.product-item-name a.product-item-link"
+                )
+                carpet_size = size_tag.get_text(strip=True) if size_tag else None
+                if debug:
+                    print(f"    {carpet_size}")
                 # 4) Price
                 price_tag = info.select_one(
-                    "h5.price-box.price-final_price span.map-actual-price.final-price "
+                    "div.price-box.price-final_price span.map-actual-price.final-price "
                     "span.price-container.price-msrp_price.tax.weee span.price-wrapper"
                 )
                 carpet_price = price_tag["data-price-amount"] if price_tag and price_tag.has_attr("data-price-amount") else None
-
+                if debug:
+                    print(f"    price = {carpet_price}")
                 # 5) Image URL
                 img_tag = image.select_one(
                     "div.product-top a.product.photo.product-item-photo.has-hover-image img.img-responsive.product-image-photo.img-thumbnail"
                 )
                 image_url = img_tag["data-src"] if img_tag and img_tag.has_attr("data-src") else None
-
                 if image_url:
                     # Ensure absolute URL if it's a relative path
                     if image_url.startswith("/"):
                         image_url = BASE_URL + image_url
+                if debug:
+                    print(f"    url = {image_url}")
 
                 page_data.append({
                     "carpet_name": carpet_name,
                     "carpet_material": carpet_material,
                     "carpet_weave": carpet_weave,
+                    "carpet_size": carpet_size,
                     "price": carpet_price,
                     "image_url": image_url
                 })
@@ -145,48 +144,48 @@ def scrape_one_page(page_number):
         print(f"Failed to scrape page {page_number}: {e}")
         return []
 
+def wrapper_download(i, record):
+    image_id = f"{i:05d}.jpg"
+    local_filename = os.path.join(IMAGES_FOLDER, image_id)
+
+    if record["image_url"]:
+        download_image(record["image_url"], local_filename)
+    return i, image_id
+
 def main():
     all_data = []
     for page in range(1, MAX_PAGES + 1):
         page_results = scrape_one_page(page)
         if not page_results:
             print(f"Error has occured while processing page {page}!")
-        all_data.extend(page_results)
 
+        all_data.extend(page_results)
+    
     print(f"Total carpets found: {len(all_data)}")
 
-    # downloads images in parallel
-    def wrapper_download(i, record):
-        # build a safe filename: index + sanitized carpet name
-        safe_name = sanitize_filename(record["carpet_name"])[:50]  # limit length
-        local_filename = os.path.join(IMAGES_FOLDER, f"{i:05d}_{safe_name}.jpg")
+    for i, record in enumerate(all_data):
+        image_id = f"{i:05d}.jpg"
+        local_filename = os.path.join(IMAGES_FOLDER, image_id)
+        record["id"] = i
+        record["image_local_path"] = "None"
+
         if record["image_url"]:
             download_image(record["image_url"], local_filename)
-        return local_filename
+            record["image_local_path"] = image_id
 
-    futures = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        for i, record in enumerate(all_data):
-            futures.append(executor.submit(wrapper_download, i, record))
-
-        # Collect results (image paths) in order
-        for i, f in enumerate(as_completed(futures)):
-            local_img_path = f.result()
-            # Store the local filename back into all_data
-            all_data[i]["image_local_path"] = local_img_path
-
-
-    with open(OUTPUT_CSV, "w", encoding="utf-8", newline="") as f:
+    with open(os.path.join("..", "datasets", OUTPUT_CSV), "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["Carpet Name", "Material", "Weave", "Price", "Image URL", "Local Image Path"])
+        writer.writerow(["id", "name", "material", "weave", "size", "price", "image_url", "image_filename"])
         for record in all_data:
             writer.writerow([
+                record["id"],
                 record["carpet_name"],
                 record["carpet_material"],
                 record["carpet_weave"],
+                record["carpet_size"],
                 record["price"],
                 record["image_url"] if record["image_url"] else "",
-                record["image_local_path"] if "image_local_path" in record else ""
+                record["image_local_path"] 
             ])
 
     print("Scraping complete!")

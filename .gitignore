@@ -1,3 +1,7 @@
+# Zipped carpet dataset
+datasets.zip
+datasets/
+
 # PyCharm specific files
 .idea/
 *.iml
