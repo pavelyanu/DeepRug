@@ -1,4 +1,5 @@
 import random
+import multiprocessing
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -7,13 +8,14 @@ import os, sys
 import matplotlib.pyplot as plt
 from datetime import datetime
 
+from fontTools.colorLib.builder import populateCOLRv0
+from torch.distributed.tensor.parallel import loss_parallel
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../"))
 sys.path.append(parent_dir)
 
 from vae_metric.metric import Metric
 
-import numpy as np
 
 def build_symmetric_image(img_64):
     """
@@ -45,163 +47,198 @@ def build_symmetric_image(img_64):
 
     return big_img
 
-
-# --- 1. Define the fitness and individual ---
-creator.create("FitnessMax", base.Fitness, weights=(1.0,))  # maximize probability
-creator.create("Individual", np.ndarray, fitness=creator.FitnessMax)
-
 toolbox = base.Toolbox()
 
-IMAGE_HEIGHT = 128 // 2
-IMAGE_WIDTH = 128 // 2
-CHANNELS = 3
-
-# Function to create a random individual (image) of shape (H, W, C)
+# individuals are white canvases,
 def create_individual():
-    # Pixel values in [0,1] (or [0,255], adjust accordingly)
-    return np.random.rand(IMAGE_HEIGHT, IMAGE_WIDTH, CHANNELS).astype(np.float32)
+    return np.ones((SIZE, SIZE, CHANNELS), np.float32)
 
+creator.create("FitnessMax", base.Fitness, weights=(1.0,))  # maximize probability
+creator.create("Individual", np.ndarray, fitness=creator.FitnessMax)
 toolbox.register("individual", tools.initIterate, creator.Individual, create_individual)
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
-model_path = "../results/vqvae_20250109_180050_4900.pth"
 
-# --- 2. Fitness function ---
+SIZE = 64
+CHANNELS = 3
+
+
+model_path = os.path.join("..", "results", "vqvae_small_vae_48000.pth")
+metric = Metric(model_path)
+
 def evaluate(individual):
-    # Convert individual to tensor
     img = build_symmetric_image(individual)
-    image = torch.tensor(img).permute(2, 0, 1).unsqueeze(0).float()
-    # Calculate fitness
-    metric = Metric(model_path)
-    prob_carpet = metric.evo_metric(image)
 
-    # combine with metric that checks that adjacent squares have similar color
-    
-    def color_similarity(image):
-        diff_x = np.abs(image[:, 1:, :] - image[:, :-1, :])
-        diff_y = np.abs(image[1:, :, :] - image[:-1, :, :])
+    # basically, reorder the array so that RGB column is first then coordinates, then add a batch dimension
+    image = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0)
+    return metric.evo_metric(image)
 
-        total_diff = np.sum(diff_x) + np.sum(diff_y)
+def blend_crossover(m, d, alpha=0.5):
+    if m.shape != d.shape:
+        raise ValueError("mom and dad must have the same shape")
 
-        # max_diff = 2 * (IMAGE_HEIGHT - 1) * (IMAGE_WIDTH - 1) * CHANNELS
-        # similarity_score = 1 - (total_diff / max_diff)
+    child1 = alpha * m + (1 - alpha) * d
+    child2 = alpha * d + (1 - alpha) * m
 
-        H, W, C = image.shape
-        total_pairs = H*(W - 1) + (H - 1)*W
-        max_diff = total_pairs * C * 1.0  # if pixel range is [0,1], max diff per channel = 1
+    return child1, child2
 
-        # Similarity = 1 - (normalized difference)
-        similarity_score = 1.0 - (total_diff / max_diff)
+def uniform_rows_crossover(m, d):
+    if m.shape != d.shape:
+        raise ValueError("mom and dad must have the same shape")
 
-        return similarity_score
+    mask = np.random.randint(0, 2, size=m.shape, dtype=bool)
+    child1 = np.where(mask, m, d)
+    child2 = np.where(mask, d, m)
+    return child1, child2
 
-    # Calculate color similarity score
-    similarity_score = color_similarity(individual)
+# TODO: maybe also some columns crossover
 
-    # Combine both metrics
-    combined_score = 0.5 * prob_carpet + 0.5 * similarity_score
+def subsquare_crossover(parent1, parent2, max_sub_size=16):
+    h, w, c = parent1.shape
+    # Random sub-square size
+    sub_h = random.randint(1, max_sub_size)
+    sub_w = random.randint(1, max_sub_size)
 
-    return (combined_score,)
+    # Random top-left corner
+    start_x = random.randint(0, h - sub_h)
+    start_y = random.randint(0, w - sub_w)
 
+    # Create copy to avoid overwriting parent data
+    child1 = np.copy(parent1)
+    child2 = np.copy(parent2)
 
+    # Perform the swap
+    child1[start_x:start_x+sub_h, start_y:start_y+sub_w] = parent2[start_x:start_x+sub_h, start_y:start_y+sub_w]
+    child2[start_x:start_x+sub_h, start_y:start_y+sub_w] = parent1[start_x:start_x+sub_h, start_y:start_y+sub_w]
 
+    return child1, child2
 
+def pixel_mutation(ind, prob=0.1):
+    num_mutations = int(prob * SIZE * SIZE)
+    x_coords = np.random.randint(0, SIZE, size=num_mutations)
+    y_coords = np.random.randint(0, SIZE, size=num_mutations)
+    for x, y in zip(x_coords, y_coords):
+        ind[x, y] = np.random.rand(CHANNELS) # .rand creates an array of CHANNELS elems, each between 0..1
+                                            
+    return ind
 
+def pattern_mutation(ind, pattern_size=3):
+    x, y = random.randint(0, SIZE - 1), random.randint(0, SIZE - 1)
+    color = ind[x, y]
+    shape = random.randint(0, 2)   # choose between circle, square, or triangle
+
+    # FIXME: GPT generated, i was too lazy to code the shapes in, so beware
+    if shape == 0:   # circle
+        xx, yy = np.meshgrid(np.arange(SIZE), np.arange(SIZE))
+        mask = (xx - x) ** 2 + (yy - y) ** 2 <= pattern_size ** 2
+        ind[mask] = color
+
+    elif shape == 1:  # square
+        x_min, x_max = max(0, x - pattern_size), min(SIZE, x + pattern_size)
+        y_min, y_max = max(0, y - pattern_size), min(SIZE, y + pattern_size)
+        ind[x_min:x_max, y_min:y_max] = color
+
+    elif shape == 2:  # triangle
+        for i in range(max(0, x - pattern_size), min(SIZE, x + pattern_size)):
+            for j in range(max(0, y - pattern_size), min(SIZE, y + pattern_size)):
+                if abs(i - x) + abs(j - y) <= pattern_size:
+                    ind[i, j] = color
+
+    return ind
+
+toolbox.register("blend_XO", blend_crossover)
+toolbox.register("uniform_row_XO", uniform_rows_crossover)
+toolbox.register("subsquare_XO", subsquare_crossover)
+toolbox.register("pattern_mut", pattern_mutation)
+toolbox.register("pixel_mut", pixel_mutation)
 toolbox.register("evaluate", evaluate)
-
-# --- 3. Genetic operators ---
-# For crossover, example: 2D single-point
-def cxTwoPoint2D(ind1, ind2):
-    h, w, c = ind1.shape
-    # Flatten to 1D
-    arr1 = ind1.flatten()
-    arr2 = ind2.flatten()
-    cxpoint1 = random.randint(1, len(arr1) - 2)
-    cxpoint2 = random.randint(cxpoint1 + 1, len(arr1) - 1)
-    arr1[cxpoint1:cxpoint2], arr2[cxpoint1:cxpoint2] = arr2[cxpoint1:cxpoint2], arr1[cxpoint1:cxpoint2]
-    # reshape back
-    ind1[:] = arr1.reshape(h, w, c)
-    ind2[:] = arr2.reshape(h, w, c)
-    return ind1, ind2
-
-toolbox.register("mate", cxTwoPoint2D)
-
-# For mutation, example: add noise
-def mutGaussian(ind, mu=0.0, sigma=0.05, indpb=0.05):
-    # Flatten
-    arr = ind.flatten()
-    for i in range(len(arr)):
-        if random.random() < indpb:
-            arr[i] += random.gauss(mu, sigma)
-            arr[i] = np.clip(arr[i], 0, 1)  # keep in [0,1]
-    ind[:] = arr.reshape(ind.shape)
-    return (ind,)
-
-toolbox.register("mutate", mutGaussian)
-# toolbox.register("select", tools.selTournament, tournsize=3)
 toolbox.register("select", tools.selRoulette)
 
-# --- 4. Evolve ---
-def main():
+
+def evolution():
     timestamp = datetime.now().strftime("%d%m%Y_%H%M%S")
-    pop = toolbox.population(n=700)
-    NGEN = 2000
-    CXPB, MUTPB = 0.5, 0.1
-    
-    # Evaluate initial population
-    fitnesses = list(map(toolbox.evaluate, pop))
-    for ind, fit in zip(pop, fitnesses):
-        ind.fitness.values = fit
-    
+    random.seed(42)
+
+    POP_SIZE = 500
+    NGEN = 300
+    CXPB = 0.7
+    MUTPB = 0.3
+
+    STAGNATION_LIMIT = 10
+    EPSILON = 1e-6
+    stagnation_count = 0
+    prev_mean = None
+
+    population = toolbox.population(n=POP_SIZE)
+
+    fitnesses = list(map(toolbox.evaluate, population))
+    for ind, fit in zip(population, fitnesses):
+        ind.fitness.values = (fit,)
+
     for gen in range(NGEN):
-        print(f"--- Generation {gen} ---")
-        # Select
-        offspring = toolbox.select(pop, len(pop))
-        # Clone
+        print(f"=== Generation {gen} ===")
+        offspring = toolbox.select(population, len(population))
         offspring = list(map(toolbox.clone, offspring))
-        
-        # Crossover
+
         for child1, child2 in zip(offspring[::2], offspring[1::2]):
             if random.random() < CXPB:
-                toolbox.mate(child1, child2)
-                # invalidate fitness
-                del child1.fitness.values
-                del child2.fitness.values
-        
-        # Mutation
+                if random.random() < 0.5:
+                    child1[:], child2[:] = toolbox.blend_XO(child1, child2)
+                else:
+                    child1[:], child2[:] = toolbox.uniform_row_XO(child1, child2)
+
         for mutant in offspring:
             if random.random() < MUTPB:
-                toolbox.mutate(mutant)
+                if random.random() < 0.8:
+                    toolbox.pixel_mut(mutant)
+                else:
+                    toolbox.pattern_mut(mutant)
                 del mutant.fitness.values
-        
-        # Re-evaluate
-        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
-        fitnesses = map(toolbox.evaluate, invalid_ind)
-        for ind, fit in zip(invalid_ind, fitnesses):
-            ind.fitness.values = fit
-        
-        # Replacement
-        pop[:] = offspring
 
-        if gen % 50 == 0:
-            curr_best_ind = tools.selBest(pop, 1)[0]
+            invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+            fitnesses = toolbox.map(toolbox.evaluate, invalid_ind)
+            for ind, fit in zip(invalid_ind, fitnesses):
+                ind.fitness.values = (fit,)
+
+        population[:] = offspring
+
+        fits = [ind.fitness.values[0] for ind in population]
+        length = len(population)
+        mean = sum(fits) / length
+        sum_sq = sum(x*x for x in fits)
+        std = abs(sum_sq/length - mean**2)**0.5
+        print(f"  Min {min(fits):.3f}")
+        print(f"  Max {max(fits):.3f}")
+        print(f"  Avg {mean:.3f}")
+        print(f"  Std {std:.3f}")
+
+        if prev_mean is not None:
+            if abs(mean - prev_mean) < EPSILON:
+                stagnation_count += 1
+            else:
+                stagnation_count = 0
+            if stagnation_count >= STAGNATION_LIMIT:
+                print("Aladin found its carpet")
+                break
+        prev_mean = mean
+
+        if gen % 5 == 0:
+            curr_best_ind = tools.selBest(population, 1)[0]
             img = build_symmetric_image(curr_best_ind)
             os.makedirs(f"run{timestamp}", exist_ok=True)
             plt.imshow(torch.tensor(img).cpu().numpy())
             plt.savefig(f"run{timestamp}/gen_{gen}.png")
-            
- 
-    
-    # Return best
-    best_ind = tools.selBest(pop, 1)[0]
+
+    best_ind = tools.selBest(population, 1)[0]
+    print("\nBest individual is:", best_ind)
+    print("Best fitness is:", best_ind.fitness.values[0])
+
     return best_ind
 
 if __name__ == "__main__":
-    best_ind = main()
+    best_ind = evolution()
     best_ind = build_symmetric_image(best_ind)
-    # best_image is the evolved array with highest "carpet-likeness"
     best_image = torch.tensor(best_ind).cpu().numpy()
-    print("Best individual (image):", best_image)
 
     plt.imshow(best_image)
     plt.savefig("best_image.png")

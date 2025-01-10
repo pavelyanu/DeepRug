@@ -1,6 +1,11 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import os
+import sys
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../"))
+sys.path.append(parent_dir)
+
 from vae_metric.models.encoder import Encoder
 from vae_metric.models.quantizer import VectorQuantizer
 from vae_metric.models.decoder import Decoder
